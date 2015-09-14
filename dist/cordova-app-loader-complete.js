@@ -126,20 +126,12 @@
 
 	AppLoader.prototype.getBundledManifest = function(){
 	  var self = this;
-	  var bootstrapScript = document.querySelector('script[manifest]');
-	  var bundledManifestUrl = (bootstrapScript? bootstrapScript.getAttribute('manifest'): null) || 'manifest.json';
-
-	  return new Promise(function(resolve,reject){
-	    if(self.bundledManifest) {
-	      resolve(self.bundledManifest);
-	    } else {
-	      pegasus(bundledManifestUrl).then(function(bundledManifest){
-	        self.bundledManifest = bundledManifest;
-	        resolve(bundledManifest);
-	      },reject);
-	      setTimeout(function(){reject(new Error('bundled manifest timeout'));},self._checkTimeout);
-	    }
-	  });
+		return new Promise(function (resolve, reject) {
+      //HURDLR CHANGE: Get the bundled manifest our way
+      self.bundledManifest = traxAppLoader.getBundledManifest();
+      //END HURDLR CHANGE: Get the bundled manifest our way
+			resolve(self.bundledManifest);
+		});
 	};
 
 
@@ -151,12 +143,28 @@
 	  }
 
 	  var gotNewManifest = new Promise(function(resolve,reject){
-	    if(typeof newManifest === "object") {
-	      resolve(newManifest);
-	    } else {
-	      pegasus(self.newManifestUrl).then(resolve,reject);
-	      setTimeout(function(){reject(new Error('new manifest timeout'));},self._checkTimeout);
-	    }
+			if(typeof newManifest === "object") {
+				resolve(newManifest);
+			} else {
+				//HURDLR CHANGE: We need to do a few extra things to get the new manifest, including adding an auth code for security
+				traxAppLoader.getAuthCode(function (authCode) {
+					var url = traxAppLoader.useCacheBuster ? self.newManifestUrl + "?" + Date.now() : self.newManifestUrl;
+					var requestFile;
+					if (isPhoneGapApp && isiOS()) {
+						requestFile = "iOS_manifest.json";
+					} else {
+						requestFile = "android_manifest.json";
+					}
+					var headers = { auth_code: authCode, request_file: requestFile };
+					pegasus(url, null, headers)
+						.then(function (data) {
+							var manifest = traxAppLoader.parseManifestFromServer(data);
+							resolve(manifest);
+						},reject);
+				});
+				//END HURDLR CHANGE
+				setTimeout(function(){reject(new Error('new manifest timeout'));},self._checkTimeout);
+			}
 	  });
 
 	  return new Promise(function(resolve,reject){
@@ -177,7 +185,9 @@
 	          var currentFiles = hash(Manifest.files);
 	          if(self._lastUpdateFiles !== currentFiles){
 	            // No! So we've updated, yet they don't appear in our manifest. This means:
-	            console.warn('New manifest available, but an earlier update attempt failed. Will not download.');
+							//HURDLR CHANGE: Use Bugsnag instead of console.warn
+							Bugsnag.notify("LoadApp_earlierUpdateFailed", 'New manifest available, but an earlier update attempt failed. Will not download.', /*metadata*/{}, "error");
+							//END HURDLR CHANGE
 	            self.corruptNewManifest = true;
 	            resolve(null);
 	          }
@@ -216,7 +226,8 @@
 	          // Add them to the correct list
 	          .forEach(function(file){
 	            // bundled version matches new version, so we can copy!
-	            if(isCordova && bundledFiles[file] && bundledFiles[file].version === newFiles[file].version){
+							//HURDLR CHANGE (one line): Toggle copying of files.  Originally we toggled file copying because there was a bug in cordova-app-loader
+							if(isCordova && bundledFiles[file] && bundledFiles[file].version === newFiles[file].version && traxAppLoader.allowCopyingFiles){
 	              self._toBeCopied.push(file);
 	            // othwerwise, we must download
 	            } else {
@@ -263,8 +274,8 @@
 	AppLoader.prototype.canUpdate = function(){
 	  return this._updateReady;
 	};
-
-	AppLoader.prototype.download = function(onprogress){
+	//HURDLR CHANGE (one line): Allow options so we can pass headers to the GET request that downloads files
+	AppLoader.prototype.download = function(onprogress, options){
 	  var self = this;
 	  if(!self.canDownload()) {
 	    return new Promise(function(resolve){ resolve(null); });
@@ -285,7 +296,8 @@
 	        self.cache.serverRoot = self.newManifest.serverRoot;
 	      }
 	      self.cache.add(self._toBeDownloaded);
-	      return self.cache.download(onprogress);
+				//HURDLR CHANGE (one line): Pass through options
+	      return self.cache.download(onprogress, options);
 	    }).then(function(){
 	      self._toBeDeleted = [];
 	      self._toBeDownloaded = [];
@@ -304,7 +316,13 @@
 	  if(this._updateReady) {
 	    // update manifest
 	    localStorage.setItem('manifest',JSON.stringify(this.newManifest));
-	    if(reload !== false) location.reload();
+			//HURDLR CHANGE: We allow passing in a url so we can load the app at a specific page
+			if(typeof reload === "string") {
+				location = reload;
+			} else if (reload !== false) {
+				location.reload();
+			}
+			//END HURDLR CHANGE
 	    return true;
 	  }
 	  return false;
@@ -316,11 +334,24 @@
 	  return this.cache.clear();
 	};
 
-	AppLoader.prototype.reset = function(){
+	//HURDLR CHANGE (one line): Pass in url
+	AppLoader.prototype.reset = function(url){
 	  return this.clear().then(function(){
-	    location.reload();
+      //HURDLR CHANGE: We allow passing in a url so we can load the app at a specific page
+			if (typeof url === "string") {
+				location = url;
+			} else {
+				location.reload();
+			}
+			//END HURDLR CHANGE
 	  },function(){
-	    location.reload();
+			//HURDLR CHANGE: We allow passing in a url so we can load the app at a specific page
+			if (typeof url === "string") {
+				location = url;
+			} else {
+				location.reload();
+			}
+			//END HURDLR CHANGE
 	  });
 	};
 
@@ -439,7 +470,10 @@
 	  return this.getDownloadQueue().length > 0;
 	};
 
-	FileCache.prototype.download = function download(onprogress){
+	//HURDLR CHANGE (one line): Allow options so we can pass headers to the GET request that downloads files
+	FileCache.prototype.download = function download(onprogress, options){
+		//HURDLR CHANGE (one line): Make sure options exists
+		options = options || {};
 	  var fs = this._fs;
 	  var self = this;
 	  self.abort();
@@ -510,7 +544,10 @@
 	        };
 	        var downloadUrl = url;
 	        if(self._cacheBuster) downloadUrl += "?"+Date.now();
-	        var download = fs.download(downloadUrl,path,{retry:self._retry},onSingleDownloadProgress);
+					//HURDLR CHANGE: Pass through options
+					options.retry = self._retry;
+					var download = fs.download(downloadUrl,path,options,onSingleDownloadProgress);
+					//END HURDLR CHANGE
 	        download.then(onDone,onDone);
 	        self._downloading.push(download);
 	      });
@@ -603,11 +640,21 @@
 	  rootDirEntry.getDirectory(folders[0], {create: true}, function(dirEntry) {
 	    // Recursively add the new subfolder (if we still have another to create).
 	    if (folders.length > 1) {
-	      __createDir(dirEntry, folders.slice(1),success,error);
+	      __createDir(dirEntry, folders.slice(1),success, function () {
+					//HURDLR CHANGE: Log error to bugsnag
+					Bugsnag.notify("LoadApp_createDirError", /*message*/null, /*metadata*/{}, "error");
+					error();
+					//END HURDLR CHANGE
+				});
 	    } else {
 	      success(dirEntry);
 	    }
-	  }, error);
+	  }, function () {
+			//HURDLR CHANGE: Log error to bugsnag
+			Bugsnag.notify("LoadApp_getDirectoryError", /*message*/null, /*metadata*/{}, "error");
+			error();
+			//END HURDLR CHANGE
+		});
 	}
 
 	function dirname(str) {
@@ -659,9 +706,18 @@
 	    if(typeof webkitRequestFileSystem !== 'undefined'){
 	      window.requestFileSystem = webkitRequestFileSystem;
 	      window.FileTransfer = function FileTransfer(){};
-	      FileTransfer.prototype.download = function download(url,file,win,fail) {
-	        var xhr = new XMLHttpRequest();
-	        xhr.open('GET', url);
+				//HURDLR CHANGE: Use options for file transfer download
+				FileTransfer.prototype.download = function download(url,file,win,fail, trustAllHosts, options) {
+					var xhr = new XMLHttpRequest();
+					xhr.open('GET', url);
+					if (options && options.headers) {
+						Object
+							.keys(options.headers)
+							.forEach(function (key) {
+								xhr.setRequestHeader(key, options.headers[key]);
+							});
+					}
+					//END HURDLR CHANGE
 	        xhr.responseType = "blob";
 	        xhr.onreadystatechange = function(onSuccess, onError, cb) {
 	          if (xhr.readyState == 4) {
@@ -700,7 +756,7 @@
 	      }
 	      // Chrome only supports persistent and temp storage, not the exotic onces from Cordova
 	      if(!isCordova && type > 1) {
-	        console.warn('Chrome does not support fileSystem "'+type+'". Falling back on "0" (temporary).');
+					console.warn('Chrome does not support fileSystem "'+type+'". Falling back on "0" (temporary).');
 	        type = 0;
 	      }
 	      window.requestFileSystem(type, options.storageSize, resolve, reject);
@@ -712,7 +768,8 @@
 	  fs.then(function(fs){
 	    window.__fs = fs;
 	  },function(err){
-	    console.error('Could not get Cordova FileSystem:',err);
+			//HURDLR CHANGE (one line): Use Bugsnag rather than console.error
+			Bugsnag.notify("LoadApp_cordovaFileSystem", err.toString(), /*metadata*/{}, "error");
 	  });
 
 	  /* ensure directory exists */
@@ -972,7 +1029,32 @@
 	      if(ft._aborted) {
 	        inprogress--;
 	      } else if(isDownload){
-	        ft.download.call(ft,serverUrl,localPath,win,fail,trustAllHosts,transferOptions);
+          //HURDLR CHANGE: We send special GET requests to download files
+					if (!traxAppLoader.useLocalServer && serverUrl.indexOf("file:///") === -1) {
+						var traxUrl;
+						//The format normall to pull asssets normally is http://server.com/path/to/file.  We want to add a bit of
+						//security by requiring an access token and going through a security endpoint to access the file. Therefore,
+						//our request looks more like https://server.com/getFile (headers: request_file, access_token)
+						var info = traxAppLoader.urlToTraxSecureInfo(serverUrl);
+						transferOptions = transferOptions || {};
+						transferOptions.headers = transferOptions.headers || {};
+						if (isPhoneGapApp && isiOS()) {
+							transferOptions.headers.request_file = "iOS/" + info.filename;
+						} else {
+							//Android and webpage files are the same.  Only iOS files are weird
+							//because we remove "use strict"
+							transferOptions.headers.request_file = "android/" + info.filename;
+						}
+						if (info.timestamp) {
+							traxUrl = traxAppLoader.downloadUrl + "?" + info.timestamp;
+						} else {
+							traxUrl = traxAppLoader.downloadUrl;
+						}
+						ft.download.call(ft,traxUrl,localPath,win,fail,trustAllHosts,transferOptions);
+					} else {
+						ft.download.call(ft,serverUrl,localPath,win,fail,trustAllHosts,transferOptions);
+					}
+					//END HURDLR CHANGE
 	        if(ft.onprogress) ft.onprogress(new ProgressEvent());
 	      } else {
 	        ft.upload.call(ft,localPath,serverUrl,win,fail,transferOptions,trustAllHosts);
